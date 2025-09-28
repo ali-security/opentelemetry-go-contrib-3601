@@ -202,3 +202,53 @@ func TestHandlerReadingNilBodySuccess(t *testing.T) {
 	h.ServeHTTP(rr, r)
 	assert.Equal(t, 200, rr.Result().StatusCode)
 }
+
+func TestCVE202221698_MethodFiltering(t *testing.T) {
+	// Test that non-standard HTTP methods are filtered to prevent unbounded cardinality
+	testCases := []struct {
+		method   string
+		expected string
+		desc     string
+	}{
+		{"GET", "GET", "standard GET method"},
+		{"POST", "POST", "standard POST method"},
+		{"PUT", "PUT", "standard PUT method"},
+		{"DELETE", "DELETE", "standard DELETE method"},
+		{"HEAD", "HEAD", "standard HEAD method"},
+		{"OPTIONS", "OPTIONS", "standard OPTIONS method"},
+		{"PATCH", "PATCH", "standard PATCH method"},
+		{"TRACE", "TRACE", "standard TRACE method"},
+		{"CONNECT", "CONNECT", "standard CONNECT method"},
+		{"get", "GET", "lowercase standard method"},
+		{"CUSTOM_METHOD", "_OTHER", "non-standard method"},
+		{"HACKY-METHOD", "_OTHER", "non-standard method with special chars"},
+		{"", "_OTHER", "empty method"},
+		{"VERY_LONG_NON_STANDARD_METHOD_NAME", "_OTHER", "long non-standard method"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			result := methodMetric(tc.method)
+			assert.Equal(t, tc.expected, result, "methodMetric(%q) should return %q", tc.method, tc.expected)
+		})
+	}
+}
+
+func TestCVE202221698_MetricAttributes(t *testing.T) {
+	// Test that HTTPServerRequestMetrics filters method attributes correctly
+	req, err := http.NewRequest("CUSTOM_METHOD", "http://example.com/path", nil)
+	assert.NoError(t, err)
+
+	attrs := HTTPServerRequestMetrics("test-operation", req)
+
+	// Check that if HTTP method attribute exists, it's been filtered
+	for _, attr := range attrs {
+		if attr.Key == semconv.HTTPMethodKey {
+			assert.Equal(t, "_OTHER", attr.Value.AsString(), "HTTP method should be filtered to _OTHER for non-standard methods")
+			return
+		}
+	}
+
+	// If we reach here, either no method attribute was found (which is also fine)
+	// or the method was properly filtered
+}

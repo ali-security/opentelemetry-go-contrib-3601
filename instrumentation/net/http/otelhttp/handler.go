@@ -17,6 +17,7 @@ package otelhttp
 import (
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/felixge/httpsnoop"
@@ -30,6 +31,46 @@ import (
 )
 
 var _ http.Handler = &Handler{}
+
+// Standard HTTP methods that are allowed in metrics to prevent unbounded cardinality
+var standardHTTPMethods = map[string]bool{
+	http.MethodGet:     true,
+	http.MethodHead:    true,
+	http.MethodPost:    true,
+	http.MethodPut:     true,
+	http.MethodPatch:   true,
+	http.MethodDelete:  true,
+	http.MethodConnect: true,
+	http.MethodOptions: true,
+	http.MethodTrace:   true,
+}
+
+// methodMetric returns a normalized HTTP method for metrics to prevent unbounded cardinality.
+// Non-standard methods are replaced with "_OTHER" to address CVE-2022-21698.
+func methodMetric(method string) string {
+	method = strings.ToUpper(method)
+	if standardHTTPMethods[method] {
+		return method
+	}
+	return "_OTHER"
+}
+
+// HTTPServerRequestMetrics returns attributes for HTTP server request metrics with
+// method filtering to prevent unbounded cardinality (CVE-2022-21698).
+func HTTPServerRequestMetrics(serverName string, req *http.Request) []attribute.KeyValue {
+	// Get base attributes from semconv but filter the method for metrics
+	attrs := semconv.HTTPServerMetricAttributesFromHTTPRequest(serverName, req)
+
+	// Find and replace any HTTP method attribute with filtered version
+	for i, attr := range attrs {
+		if attr.Key == semconv.HTTPMethodKey {
+			attrs[i] = semconv.HTTPMethodKey.String(methodMetric(req.Method))
+			break
+		}
+	}
+
+	return attrs
+}
 
 // Handler is http middleware that corresponds to the http.Handler interface and
 // is designed to wrap a http.Mux (or equivalent), while individual routes on
@@ -181,7 +222,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setAfterServeAttributes(span, bw.read, rww.written, rww.statusCode, bw.err, rww.err)
 
 	// Add metrics
-	attributes := append(labeler.Get(), semconv.HTTPServerMetricAttributesFromHTTPRequest(h.operation, r)...)
+	attributes := append(labeler.Get(), HTTPServerRequestMetrics(h.operation, r)...)
 	h.counters[RequestContentLength].Add(ctx, bw.read, attributes...)
 	h.counters[ResponseContentLength].Add(ctx, rww.written, attributes...)
 
